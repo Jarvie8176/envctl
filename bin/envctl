@@ -42,7 +42,6 @@ import tempfile
 from pathlib import Path
 
 VERSION = "0.1.0"
-SOURCE_REVISION = "0308fdbf8706cbeffb5ca724a4fcb65dd7973ad8"
 
 BAKCTL = str(Path(__file__).resolve().with_name("bakctl"))
 SOPS = os.environ.get("ENVCTL_SOPS_BIN") or shutil.which("sops") or "/opt/homebrew/bin/sops"
@@ -274,7 +273,7 @@ def _mutation_lock(path: Path):
 def _version() -> str:
     metadata = Path(__file__).resolve().parents[1] / "RELEASE.json"
     commit = json.loads(metadata.read_text())["commit"] if metadata.is_file() else "development"
-    return f"envctl {VERSION} (commit {commit}; extraction {SOURCE_REVISION})"
+    return f"envctl {VERSION} (commit {commit})"
 
 
 def main() -> int:

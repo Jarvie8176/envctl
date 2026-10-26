@@ -1,9 +1,8 @@
 envctl and bakctl are distributed together under the MIT License.
 
-The initial implementation was extracted by file allowlist from commit
-0308fdbf8706cbeffb5ca724a4fcb65dd7973ad8 with the source owner's authorization.
-No source repository history, operational configuration, or credentials are
-included. Public development and release commits have a separate history.
+The initial implementation is published with the source owner's authorization.
+Operational configuration and credentials are not included. RELEASE.json records
+only the public source commit used to build each release.
 
 SOPS, age, Python, PyYAML, and pytest are external dependencies and retain
 their own licenses; their implementations are not bundled here.

@@ -61,7 +61,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 VERSION = "0.1.0"
-SOURCE_REVISION = "0308fdbf8706cbeffb5ca724a4fcb65dd7973ad8"
 
 CONFIG_FILE = Path("~/.config/bakctl/config.yaml").expanduser()
 
@@ -425,7 +424,7 @@ def cmd_config(args) -> int:
 def _version() -> str:
     metadata = Path(__file__).resolve().parents[1] / "RELEASE.json"
     commit = json.loads(metadata.read_text())["commit"] if metadata.is_file() else "development"
-    return f"bakctl {VERSION} (commit {commit}; extraction {SOURCE_REVISION})"
+    return f"bakctl {VERSION} (commit {commit})"
 
 
 def main() -> int:
