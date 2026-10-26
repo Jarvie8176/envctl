@@ -31,7 +31,7 @@ atomically switched `current` link. It refuses to replace unmanaged commands.
 Install a different prefix if you already have another `envctl` or `bakctl`.
 Hashes provide integrity, not independent publisher authentication: trust the
 repository, release tag, and download channel. `RELEASE.json` records the exact
-public source commit; `NOTICE` records the extraction baseline.
+public source commit. Private provenance is not part of the distribution.
 
 Upgrade by installing another verified release into the same prefix. Roll back
 by running the earlier release's installer again. Existing version directories
@@ -69,6 +69,7 @@ single-line assignments, not shell scripts. See [format and compatibility](docs/
 - [Architecture and component boundaries](docs/architecture.md)
 - [Security model and limitations](docs/security-model.md)
 - [Integrations and adoption](docs/integrations.md)
+- [Publication privacy checks](docs/publication-checks.md)
 - [Changelog](CHANGELOG.md)
 
 ```sh

@@ -15,6 +15,7 @@ FILES = [
     'README.md', 'LICENSE', 'NOTICE', 'CHANGELOG.md', 'VERSION',
     'docs/architecture.md', 'docs/security-model.md',
     'docs/format-and-compatibility.md', 'docs/integrations.md',
+    'docs/publication-checks.md',
     'examples/example.env', 'examples/.sops.yaml',
 ]
 
@@ -32,8 +33,7 @@ def main():
     version = (ROOT / 'VERSION').read_text().strip()
     commit = git('rev-parse', 'HEAD')
     payload = {name: (ROOT / name).read_bytes() for name in FILES}
-    metadata = {'version': version, 'commit': commit,
-                'extracted_from_commit': '0308fdbf8706cbeffb5ca724a4fcb65dd7973ad8'}
+    metadata = {'version': version, 'commit': commit}
     payload['RELEASE.json'] = (json.dumps(metadata, indent=2) + '\n').encode()
     manifest = {name: hashlib.sha256(data).hexdigest() for name, data in sorted(payload.items())}
     payload['MANIFEST.json'] = (json.dumps(manifest, indent=2) + '\n').encode()

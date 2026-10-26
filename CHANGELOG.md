@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add publication privacy gates for source, new commit metadata, complete secret
+  history and built artifacts; require them before release upload.
+- Remove private extraction provenance from current source and generated assets.
+  Earlier public history and releases require separate cleanup.
+
 ## 0.1.0 — 2026-10-26
 
 - Initial independent MIT release; envctl and bakctl distributed together.
