@@ -1,0 +1,4 @@
+creation_rules:
+  - path_regex: '\.enc$'
+    # Replace with your own age-keygen public recipient before use.
+    age: REPLACE_WITH_YOUR_AGE_PUBLIC_RECIPIENT

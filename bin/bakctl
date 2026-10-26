@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""bakctl — versioned file backup with tiered retention.
+
+Convention: every backup of FILE is written as <FILE>.bak.<unix-ts> in the same
+directory. mtime is preserved (cp -p). Restore writes a "pre-restore.<unix>"
+snapshot of the current file before overwriting.
+
+Snapshot time = the <unix-ts> suffix, NOT mtime. Because of cp -p, a backup's
+mtime is the *source's* last-modified time, so ageing by mtime made a fresh
+snapshot of a long-untouched file look ancient and auto-prune deleted it on
+creation. Ordering and retention therefore read the suffix only, and
+tiered prune always keeps the newest snapshot. A new suffix is always above every
+existing one (not merely unused), so the snapshot just taken IS the newest even
+when a burst of backups in one second has pushed suffixes ahead of the clock and
+prune has left holes below them.
+
+Operations:
+  backup FILE              — snapshot now; auto-prunes if configured (default: on)
+  history FILE             — list backups for FILE, newest first
+  restore FILE TS          — restore <FILE>.bak.<TS> (current is saved as pre-restore.<ts>)
+  prune FILE               — tiered retention (config or built-in defaults)
+  prune FILE --keep N      — legacy: keep newest N, delete the rest
+  diff FILE TS             — diff backup against current
+  path FILE TS             — print the backup path (for piping to other tools)
+  config show              — dump effective config (defaults + overrides)
+  config get KEY           — get a config value (dot-separated path)
+  config set KEY VALUE     — set a config value
+  config unset KEY         — remove override, revert to default
+  config reset             — delete config file, revert all to defaults
+
+Config: ~/.config/bakctl/config.yaml
+  auto_prune: true           (prune after every backup)
+  retention.recent: 24h      (keep all within this window)
+  retention.daily: 7d        (keep 1/day within this window)
+  retention.weekly: 14d      (keep 1/week within this window)
+  max_count: 30              (hard ceiling)
+
+Reused by envctl and any tool that wants automatic backups; can also be called
+standalone before a sed/$EDITOR session.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+import datetime
+import difflib
+import shutil
+import sys
+import time
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+VERSION = "0.1.0"
+SOURCE_REVISION = "0308fdbf8706cbeffb5ca724a4fcb65dd7973ad8"
+
+CONFIG_FILE = Path("~/.config/bakctl/config.yaml").expanduser()
+
+DEFAULTS: dict = {
+    "auto_prune": True,
+    "retention": {
+        "recent": "24h",
+        "daily": "7d",
+        "weekly": "14d",
+    },
+    "max_count": 30,
+}
+
+
+def _parse_duration(s: str) -> float:
+    s = s.strip()
+    if s.endswith("w"):
+        return int(s[:-1]) * 604800
+    if s.endswith("d"):
+        return int(s[:-1]) * 86400
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    return int(s)
+
+
+def _load_config() -> dict:
+    if not CONFIG_FILE.is_file():
+        return {}
+    if yaml is None:
+        print("bakctl: PyYAML not installed; using defaults", file=sys.stderr)
+        return {}
+    with open(CONFIG_FILE, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_config(cfg: dict) -> None:
+    if yaml is None:
+        sys.exit("bakctl: PyYAML required for config writes")
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _effective_config() -> dict:
+    return _deep_merge(DEFAULTS, _load_config())
+
+
+def _get_nested(d: dict, key: str):
+    for part in key.split("."):
+        if not isinstance(d, dict) or part not in d:
+            return None
+        d = d[part]
+    return d
+
+
+def _set_nested(d: dict, key: str, value) -> None:
+    parts = key.split(".")
+    for part in parts[:-1]:
+        if part not in d or not isinstance(d[part], dict):
+            d[part] = {}
+        d = d[part]
+    d[parts[-1]] = value
+
+
+def _del_nested(d: dict, key: str) -> bool:
+    parts = key.split(".")
+    for part in parts[:-1]:
+        if not isinstance(d, dict) or part not in d:
+            return False
+        d = d[part]
+    if isinstance(d, dict) and parts[-1] in d:
+        del d[parts[-1]]
+        return True
+    return False
+
+
+def _coerce(value: str):
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Backup core
+# ---------------------------------------------------------------------------
+
+def backup_path(file: Path, ts: int) -> Path:
+    return file.with_name(f"{file.name}.bak.{ts}")
+
+
+def do_backup(file: Path, *, auto_prune: bool | None = None) -> Path:
+    if not file.is_file():
+        sys.exit(f"bakctl: not a file: {file}")
+    ts = int(time.time())
+    existing = list_backups(file)
+    if existing:
+        ts = max(ts, _backup_ts(existing[0]) + 1)
+    bak = backup_path(file, ts)
+    while bak.exists():  # a concurrent writer took it between list and copy
+        ts += 1
+        bak = backup_path(file, ts)
+    shutil.copy2(file, bak)
+    cfg = _effective_config()
+    should_prune = auto_prune if auto_prune is not None else cfg.get("auto_prune", True)
+    if should_prune:
+        _do_tiered_prune(file, cfg)
+    return bak
+
+
+def _backup_ts(bak: Path) -> int:
+    """Snapshot time of a backup = its numeric <unix-ts> suffix."""
+    return int(bak.name.rsplit(".bak.", 1)[-1])
+
+
+def list_backups(file: Path) -> list[Path]:
+    prefix = f"{file.name}.bak."
+    if not file.parent.is_dir():
+        return []
+    matches = []
+    for p in file.parent.iterdir():
+        if not p.name.startswith(prefix):
+            continue
+        suffix = p.name[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        matches.append(p)
+    return sorted(matches, key=_backup_ts, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Tiered retention
+# ---------------------------------------------------------------------------
+
+def _tiered_partition(backups: list[Path], cfg: dict) -> tuple[list[Path], list[Path]]:
+    """Split backups into (keep, delete) using tiered retention.
+
+    Ages come from the snapshot-time suffix (see module docstring). The newest
+    snapshot is always kept: retention thins history, it never empties it.
+    """
+    now = time.time()
+    ret = cfg.get("retention", DEFAULTS["retention"])
+    max_count = cfg.get("max_count", DEFAULTS["max_count"])
+    recent_secs = _parse_duration(ret.get("recent", "24h"))
+    daily_secs = _parse_duration(ret.get("daily", "7d"))
+    weekly_secs = _parse_duration(ret.get("weekly", "14d"))
+
+    keep: list[Path] = []
+    delete: list[Path] = []
+    daily_seen: set[str] = set()
+    weekly_seen: set[tuple[int, int]] = set()
+
+    for b in backups:  # newest-first
+        ts = _backup_ts(b)
+        age = now - ts
+        if age <= recent_secs:
+            keep.append(b)
+        elif age <= daily_secs:
+            day = time.strftime("%Y-%m-%d", time.localtime(ts))
+            if day not in daily_seen:
+                daily_seen.add(day)
+                keep.append(b)
+            else:
+                delete.append(b)
+        elif age <= weekly_secs:
+            iso = datetime.datetime.fromtimestamp(ts).isocalendar()
+            wk = (iso[0], iso[1])
+            if wk not in weekly_seen:
+                weekly_seen.add(wk)
+                keep.append(b)
+            else:
+                delete.append(b)
+        else:
+            delete.append(b)
+
+    if len(keep) > max_count:
+        delete.extend(keep[max_count:])
+        keep = keep[:max_count]
+
+    if backups and backups[0] in delete:
+        delete.remove(backups[0])
+        keep.insert(0, backups[0])
+
+    return keep, delete
+
+
+def _do_tiered_prune(file: Path, cfg: dict | None = None) -> int:
+    if cfg is None:
+        cfg = _effective_config()
+    baks = list_backups(file)
+    if not baks:
+        return 0
+    keep, delete = _tiered_partition(baks, cfg)
+    for v in delete:
+        v.unlink()
+        print(f"deleted {v.name}", file=sys.stderr)
+    if delete:
+        print(f"kept {len(keep)}, deleted {len(delete)} backup(s) for {file.name}",
+              file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_backup(args) -> int:
+    file = Path(args.file).expanduser()
+    bak = do_backup(file)
+    print(bak)
+    return 0
+
+
+def cmd_history(args) -> int:
+    file = Path(args.file).expanduser()
+    baks = list_backups(file)
+    if not baks:
+        print(f"(no backups for {file})", file=sys.stderr)
+        return 0
+    for b in baks:
+        st = b.stat()
+        ts = b.name.rsplit(".bak.", 1)[-1]
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+        print(f"{ts}\t{when}\t{st.st_size}B\t{b.name}")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    file = Path(args.file).expanduser()
+    if not args.ts.isascii() or not args.ts.isdigit():
+        sys.exit("bakctl: timestamp must be numeric")
+    bak = file.with_name(f"{file.name}.bak.{args.ts}")
+    if not bak.is_file():
+        sys.exit(f"bakctl: no such backup: {bak}")
+    if file.is_symlink() or bak.is_symlink():
+        sys.exit("bakctl: symlink restore targets are not supported")
+    if file.exists() and (not file.is_file() or file.stat().st_nlink != 1):
+        sys.exit("bakctl: restore requires a regular file with one link")
+    if file.is_file():
+        stamp = int(time.time())
+        pre = file.with_name(f"{file.name}.pre-restore.{stamp}")
+        while pre.exists():
+            stamp += 1
+            pre = file.with_name(f"{file.name}.pre-restore.{stamp}")
+        shutil.copy2(file, pre)
+        print(f"current saved to {pre}", file=sys.stderr)
+    fd, tmp = tempfile.mkstemp(prefix=file.name + ".restore.", dir=file.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(bak, tmp)
+        os.replace(tmp, file)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print(f"restored {file} from {bak.name}", file=sys.stderr)
+    return 0
+
+
+def cmd_prune(args) -> int:
+    file = Path(args.file).expanduser()
+    if args.keep is not None:
+        # Legacy count-based mode
+        keep = max(0, int(args.keep))
+        baks = list_backups(file)
+        victims = baks[keep:]
+        for v in victims:
+            v.unlink()
+            print(f"deleted {v.name}", file=sys.stderr)
+        print(f"kept {min(keep, len(baks))} backup(s) for {file.name}", file=sys.stderr)
+        return 0
+    return _do_tiered_prune(file)
+
+
+def cmd_diff(args) -> int:
+    file = Path(args.file).expanduser()
+    if not args.ts.isascii() or not args.ts.isdigit():
+        sys.exit("bakctl: timestamp must be numeric")
+    bak = file.with_name(f"{file.name}.bak.{args.ts}")
+    if not bak.is_file():
+        sys.exit(f"bakctl: no such backup: {bak}")
+    a = bak.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    b = (file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+         if file.is_file() else [])
+    sys.stdout.writelines(difflib.unified_diff(
+        a, b, fromfile=f"{bak.name}", tofile=f"{file.name}",
+    ))
+    return 0
+
+
+def cmd_path(args) -> int:
+    file = Path(args.file).expanduser()
+    print(file.with_name(f"{file.name}.bak.{args.ts}"))
+    return 0
+
+
+def cmd_config(args) -> int:
+    op = args.config_op
+    if op == "show":
+        eff = _effective_config()
+        if yaml:
+            yaml.dump(eff, sys.stdout, default_flow_style=False, sort_keys=False)
+        else:
+            for k, v in sorted(eff.items()):
+                print(f"{k}: {v}")
+        return 0
+    if op == "get":
+        val = _get_nested(_effective_config(), args.key)
+        if val is None:
+            sys.exit(f"bakctl: unknown config key: {args.key}")
+        if isinstance(val, dict):
+            if yaml:
+                yaml.dump(val, sys.stdout, default_flow_style=False, sort_keys=False)
+            else:
+                print(val)
+        else:
+            print(val)
+        return 0
+    if op == "set":
+        cfg = _load_config()
+        _set_nested(cfg, args.key, _coerce(args.value))
+        _save_config(cfg)
+        print(f"{args.key} = {_coerce(args.value)}", file=sys.stderr)
+        return 0
+    if op == "unset":
+        cfg = _load_config()
+        if _del_nested(cfg, args.key):
+            _save_config(cfg)
+            print(f"unset {args.key} (reverted to default)", file=sys.stderr)
+        else:
+            print(f"{args.key} not in config", file=sys.stderr)
+        return 0
+    if op == "reset":
+        if CONFIG_FILE.is_file():
+            CONFIG_FILE.unlink()
+            print("config reset to defaults", file=sys.stderr)
+        else:
+            print("no config file to reset", file=sys.stderr)
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _version() -> str:
+    metadata = Path(__file__).resolve().parents[1] / "RELEASE.json"
+    commit = json.loads(metadata.read_text())["commit"] if metadata.is_file() else "development"
+    return f"bakctl {VERSION} (commit {commit}; extraction {SOURCE_REVISION})"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="bakctl")
+    p.add_argument("--version", action="version",
+                   version=_version())
+    sub = p.add_subparsers(dest="op", required=True)
+
+    sp = sub.add_parser("backup"); sp.add_argument("file"); sp.set_defaults(fn=cmd_backup)
+    sp = sub.add_parser("history"); sp.add_argument("file"); sp.set_defaults(fn=cmd_history)
+    sp = sub.add_parser("restore"); sp.add_argument("file"); sp.add_argument("ts"); sp.set_defaults(fn=cmd_restore)
+    sp = sub.add_parser("prune"); sp.add_argument("file"); sp.add_argument("--keep", type=int, default=None); sp.set_defaults(fn=cmd_prune)
+    sp = sub.add_parser("diff"); sp.add_argument("file"); sp.add_argument("ts"); sp.set_defaults(fn=cmd_diff)
+    sp = sub.add_parser("path"); sp.add_argument("file"); sp.add_argument("ts"); sp.set_defaults(fn=cmd_path)
+
+    sp = sub.add_parser("config")
+    csub = sp.add_subparsers(dest="config_op", required=True)
+    csub.add_parser("show")
+    cg = csub.add_parser("get"); cg.add_argument("key")
+    cs = csub.add_parser("set"); cs.add_argument("key"); cs.add_argument("value")
+    cu = csub.add_parser("unset"); cu.add_argument("key")
+    csub.add_parser("reset")
+    sp.set_defaults(fn=cmd_config)
+
+    args = p.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
