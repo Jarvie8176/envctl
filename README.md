@@ -38,6 +38,13 @@ by running the earlier release's installer again. Existing version directories
 are immutable: differing files under the same version are refused. Keep previous
 release archives. No automatic updater or `curl | sh` installer is provided.
 
+The installer rejects malformed metadata, unsafe manifest paths, linked package
+members and installation directories, and unmanaged `current` entries. Concurrent
+installs fail promptly; retry after the other installer exits. Ordinary failures
+before activation preserve the previous selection and remove newly created
+command links. A verified but inactive version directory may remain for retry.
+Do not remove `.install.lock` while an installer is running.
+
 ## Encrypted example
 
 Use a fresh directory and generate your own identity; never commit its private key.

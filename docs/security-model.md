@@ -2,6 +2,13 @@
 
 - Trust the operating system, Python, SOPS, configured identity source, package,
   and the target directory. Use a private, owner-controlled directory.
+- Installation also requires owner-controlled source and prefix directories.
+  Manifest checks detect corruption; the installer itself is executable code
+  from the trusted package. Path checks and the advisory installation lock do
+  not defend against hostile concurrent directory changes by the same OS user.
+  Normal pre-activation errors preserve the selected version. SIGKILL or power
+  loss can leave staging files or partial links; no crash-durability guarantee
+  is provided.
 - `.enc` selects SOPS dotenv encryption. Other filenames are plaintext, including
   the preserved default `~/cc/.env`. Files and backups are not auto-migrated.
 - Plaintext is passed through subprocess pipes and process memory by envctl.
