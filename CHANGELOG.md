@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Exercise installed release archives in a non-root, network-disabled Docker
+  container without PyYAML; include that E2E job in release acceptance.
+
 - Add publication privacy gates for source, new commit metadata, complete secret
   history and built artifacts; require them before release upload.
 - Remove private extraction provenance from current source and generated assets.

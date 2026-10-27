@@ -43,3 +43,29 @@ jobs:
         run: python scripts/check-privacy.py --artifacts dist
       - name: Scan release artifacts for credentials
         run: gitleaks dir dist --max-archive-depth 2 --config .github/gitleaks.toml --redact --ignore-gitleaks-allow
+  docker-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Prepare a package-only container context
+        run: |
+          context="$RUNNER_TEMP/envctl-container"
+          mkdir -p "$context"
+          python scripts/build.py --output "$context/package"
+          python scripts/ci-dependencies.py "$context/dependencies"
+          cp tests/docker/Dockerfile tests/docker/e2e.py "$context/"
+      - name: Build pinned runtime image
+        run: docker build --tag envctl-e2e:local "$RUNNER_TEMP/envctl-container"
+      - name: Run installed CLI end to end without network or host mounts
+        run: |
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=128m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 128 --memory 256m --cpus 2 \
+            envctl-e2e:local
