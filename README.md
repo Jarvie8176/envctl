@@ -82,3 +82,25 @@ Release acceptance tests require real `sops` and `age-keygen` on PATH, generate
 disposable identities, and fail when those dependencies are absent. Builds require
 a clean committed tree and emit a deterministic tarball, manifest, checksums, and
 source metadata. The PR workflow checks Linux and macOS before release publication.
+
+The `docker-e2e` CI job also installs the built archive in a digest-pinned Python
+3.13 container. The container runs as a non-root user with a read-only root
+filesystem, no network, no host mounts, and no PyYAML. It tests the installed
+commands against real SOPS/age using disposable identities: CRUD/exec, encrypted
+backups/restores, wrong-key/recipient failure protection, file permissions, locks,
+paired installation, tamper refusal, and upgrade/rollback with a synthetic
+next-version fixture. This job is part of the reusable release gate.
+
+To reproduce it on a Docker-capable machine from a clean committed checkout:
+
+```sh
+context="$(mktemp -d)"
+python3 scripts/build.py --output "$context/package"
+python3 scripts/ci-dependencies.py "$context/dependencies"
+cp tests/docker/Dockerfile tests/docker/e2e.py "$context/"
+docker build --tag envctl-e2e:local "$context"
+docker run --rm --network none --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,size=128m --cap-drop ALL \
+  --security-opt no-new-privileges --pids-limit 128 \
+  --memory 256m --cpus 2 envctl-e2e:local
+```
