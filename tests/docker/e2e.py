@@ -68,8 +68,9 @@ def main():
             require(result.returncode == expected, 'unexpected exit from ' + str(argv[0]))
             return result
 
-        def install(source, expected=0):
-            return call(['sh', source / 'scripts/install.sh', '--prefix', prefix], expected=expected)
+        def install(source, expected=0, destination=None):
+            return call(['sh', source / 'scripts/install.sh', '--prefix',
+                         destination or prefix], expected=expected)
 
         install(release)
         cli = prefix / 'bin/envctl'
@@ -209,6 +210,83 @@ def main():
         call([copied / 'bin/envctl', '--file', target, 'set', 'A'], input='synthetic-copied')
         require(target.read_text() == 'A=synthetic-copied\n', 'copied sibling pairing')
         passed('synthetic next-version upgrade, rollback and copied installation')
+
+        base = prefix / 'lib/envctl'
+        with open(base / '.install.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = install(upgrade, expected=1)
+            require('another installation' in result.stderr, 'nonblocking installer lock')
+            versions(metadata['version'])
+        install(upgrade)
+        versions(next_version)
+        install(release)
+        passed('installer lock contention preserves current pair and permits retry')
+
+        # The candidate already exists, so this reaches activation with a real
+        # permission failure creating the temporary current link.
+        base.chmod(0o500)
+        try:
+            install(upgrade, expected=1)
+            versions(metadata['version'])
+            require(not list(base.glob('.current-*')), 'no partial current link')
+        finally:
+            base.chmod(0o700)
+        install(upgrade)
+        versions(next_version)
+        install(release)
+        passed('unwritable activation directory preserves installed pair and supports retry')
+
+        blocked = root / 'blocked prefix'
+        (blocked / 'bin').mkdir(parents=True)
+        (blocked / 'bin').chmod(0o500)
+        try:
+            install(release, expected=1, destination=blocked)
+            require(not os.path.lexists(blocked / 'lib/envctl/current'), 'no partial activation')
+            require(not list((blocked / 'bin').iterdir()), 'no partial command links')
+        finally:
+            (blocked / 'bin').chmod(0o700)
+        install(release, destination=blocked)
+        call([blocked / 'bin/envctl', '--version'])
+        passed('unwritable command directory fails cleanly and supports retry')
+
+        unmanaged = root / 'unmanaged prefix'
+        current = unmanaged / 'lib/envctl/current'
+        current.parent.mkdir(parents=True)
+        current.write_text('unmanaged')
+        install(release, expected=1, destination=unmanaged)
+        require(not current.is_symlink() and current.read_text() == 'unmanaged',
+                'unmanaged current is preserved')
+        require(not os.path.lexists(unmanaged / 'bin/envctl'), 'unmanaged state creates no command')
+        passed('unmanaged activation entry is preserved')
+
+        malformed = root / 'malformed release with spaces'
+        shutil.copytree(release, malformed)
+        bad_metadata = malformed / 'RELEASE.json'
+        bad_manifest = json.loads((malformed / 'MANIFEST.json').read_text())
+        for value in (None, [], {'version': next_version},
+                      {'version': '../escape', 'commit': metadata['commit']}):
+            bad_metadata.write_text(json.dumps(value))
+            bad_manifest['RELEASE.json'] = hashlib.sha256(bad_metadata.read_bytes()).hexdigest()
+            (malformed / 'MANIFEST.json').write_text(json.dumps(bad_manifest))
+            result = install(malformed, expected=1)
+            require('Traceback' not in result.stderr, 'clean metadata rejection')
+            versions(metadata['version'])
+        passed('malformed metadata is rejected before activation')
+
+        linked = root / 'linked release'
+        shutil.copytree(release, linked)
+        external_bin = root / 'external bin'
+        (linked / 'bin').rename(external_bin)
+        (linked / 'bin').symlink_to(external_bin, target_is_directory=True)
+        install(linked, expected=1)
+        versions(metadata['version'])
+        (linked / 'bin').unlink()
+        external_bin.rename(linked / 'bin')
+        (linked / 'LICENSE').unlink()
+        os.mkfifo(linked / 'LICENSE')
+        install(linked, expected=1)
+        versions(metadata['version'])
+        passed('symlinked package directories and FIFO members are rejected without blocking')
 
         (upgrade / 'bin/bakctl').write_text('tampered\n')
         install(upgrade, expected=1)

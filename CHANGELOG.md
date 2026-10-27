@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Validate installation metadata before activation; reject unsafe package and
+  destination paths, preserve unmanaged activation entries, and clean partial
+  command links on failure. Cover malformed packages, concurrent installation,
+  storage failures, and non-root filesystem permissions in CI.
 - Exercise installed release archives in a non-root, network-disabled Docker
   container without PyYAML; include that E2E job in release acceptance.
 
