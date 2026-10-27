@@ -100,7 +100,7 @@ python3 scripts/ci-dependencies.py "$context/dependencies"
 cp tests/docker/Dockerfile tests/docker/e2e.py "$context/"
 docker build --tag envctl-e2e:local "$context"
 docker run --rm --network none --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev,size=128m --cap-drop ALL \
+  --tmpfs /tmp:rw,exec,nosuid,nodev,size=128m --cap-drop ALL \
   --security-opt no-new-privileges --pids-limit 128 \
   --memory 256m --cpus 2 envctl-e2e:local
 ```

@@ -24,6 +24,11 @@ def main():
         results.append(name)
         print('PASS ' + name, flush=True)
 
+    mounts = [line.split() for line in Path('/proc/mounts').read_text().splitlines()]
+    tmp_mount = next(fields for fields in mounts if fields[1] == '/tmp')
+    require(tmp_mount[2] == 'tmpfs' and 'noexec' not in tmp_mount[3].split(','),
+            'temporary installation needs executable tmpfs')
+    print('TMPFS options: ' + tmp_mount[3], flush=True)
     require(os.geteuid() != 0, 'test must run as non-root')
     require(importlib.util.find_spec('yaml') is None, 'test default mode without PyYAML')
     require(not Path('/opt/package/.git').exists(), 'no source checkout')
